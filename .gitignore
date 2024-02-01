@@ -1,3 +1,6 @@
+# ignore versioningit thing
+/src/openfe_skunkworks/_version.py
+
 .idea/*
 
 # Byte-compiled / optimized / DLL files
