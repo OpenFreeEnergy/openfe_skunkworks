@@ -63,6 +63,10 @@ class OpenMMSolvationSettings(BaseSolvationSettings):
             raise ValueError(errmsg)
         return v
 
+class PackmolSolvationSettings(BaseSolvationSettings):
+    solvent_padding: FloatQuantity['nanometer'] = 1.2 * unit.nanometer
+
+    is_positive_distance = validator('solvent_padding', allow_reuse=True)(OpenMMSolvationSettings.is_positive_distance)
 
 class BasePartialChargeSettings(SettingsBaseModel):
     """

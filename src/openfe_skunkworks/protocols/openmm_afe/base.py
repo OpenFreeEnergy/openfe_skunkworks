@@ -43,7 +43,6 @@ import pathlib
 from typing import Any
 import openmmtools
 import mdtraj as mdt
-
 from gufe import (
     settings, ChemicalSystem, SmallMoleculeComponent,
     ProteinComponent, SolventComponent
@@ -55,10 +54,13 @@ from openfe.protocols.openmm_utils.omm_settings import (
     BasePartialChargeSettings,
 )
 from openfe.protocols.openmm_afe.equil_afe_settings import (
-    BaseSolvationSettings,
     MultiStateSimulationSettings, OpenMMEngineSettings,
     IntegratorSettings, LambdaSettings, MultiStateOutputSettings,
     ThermoSettings, OpenFFPartialChargeSettings,
+)
+from openfe_skunkworks.protocols.openmm_utils.omm_settings import (
+    OpenMMSolvationSettings,
+    BaseSolvationSettings,
 )
 from openfe.protocols.openmm_rfe._rfe_utils import compute
 from openfe.protocols.openmm_md.plain_md_methods import PlainMDProtocolUnit
@@ -402,7 +404,7 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
         smc_components: dict[SmallMoleculeComponent, OFFMolecule],
         system_generator: SystemGenerator,
         partial_charge_settings: BasePartialChargeSettings,
-        solvation_settings: BaseSolvationSettings
+        solvation_settings: BaseSolvationSettings,
     ) -> tuple[app.Modeller, dict[Component, npt.NDArray]]:
         """
         Get an OpenMM Modeller object and a list of residue indices
@@ -499,10 +501,10 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
         if self.verbose:
             self.logger.info("Parameterizing molecules")
 
-        if (protein_component is not None) or (solvent_component is not None) or (
+        if (protein_component is not None) or (
             len(smc_components) > 1
         ):
-            raise NotImplementedError("just doing (one) small molecule in vacuum at first")
+            raise NotImplementedError("just doing (one) small molecule, no protein, at first")
 
         # Assign partial charges to smcs, doing the same thing as in _get_modeller
         self._assign_partial_charges(
@@ -523,12 +525,38 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
         force_field['vdW'].cutoff = settings['forcefield_settings'].nonbonded_cutoff
         force_field['Electrostatics'].cutoff = settings['forcefield_settings'].nonbonded_cutoff
 
-        topology = Topology.from_molecules(*smc_components.values())
+        if solvent_component is None:
+            topology = Topology.from_molecules(*smc_components.values())
+        else:
+            from openff.interchange.components._packmol import solvate_topology, UNIT_CUBE
+            
+            # might want to split out depending on if pack_box or solvate_topology is used
+            # TODO: Actually use the right settings here
+            # TODO: Either update solvation_topology to actually use non-water solvent
+            #       or use pack_box to add the solvent or make a new function altogether
+
+            # lost solvent settings include
+            #  * positive_ion
+            #  * negative_ion
+            #  * neutralize
+            # lost solvation settings include
+            #  * solvent_model
+            assert solvent_component.positive_ion == "Na+"
+            assert solvent_component.negative_ion == "Cl-"
+
+            assert len(smc_components) == 1
+
+            topology = solvate_topology(
+                topology=[*smc_components.values()][0].to_topology(),
+                nacl_conc = solvent_component.ion_concentration,
+                padding = settings['solvation_settings'].solvent_padding,
+                box_shape=UNIT_CUBE,
+            )
 
         with without_oechem_backend():
             interchange = force_field.create_interchange(
                 topology=topology,
-                charge_from_molecules=[*topology.molecules],
+                charge_from_molecules=[*smc_components.values()],
             )
 
         return (
@@ -571,9 +599,13 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
         comp_resids : dict[str, npt.NDArray]
           A dictionary of residues for each component in the System.
         """
-        use_interchange = (protein_component is None) and (solvent_component is None) and (len(smc_components) == 1)
+        use_interchange = (
+            (protein_component is None) and 
+            (len(smc_components) == 1)
+        )
 
         if use_interchange:
+            # TODO: See if the base class can really support both cases
             return self._get_omm_objects_via_interchange(
                 protein_component=protein_component,
                 solvent_component=solvent_component,
