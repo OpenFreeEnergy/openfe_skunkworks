@@ -15,8 +15,8 @@ from numpy.testing import assert_allclose
 import gufe
 import openfe
 from openfe import ChemicalSystem, SolventComponent
-from openfe.protocols import openmm_afe
-from openfe.protocols.openmm_afe import (
+from openfe_skunkworks.protocols import openmm_afe
+from openfe_skunkworks.protocols.openmm_afe import (
     AbsoluteSolvationSolventUnit,
     AbsoluteSolvationVacuumUnit,
     AbsoluteSolvationProtocol,
