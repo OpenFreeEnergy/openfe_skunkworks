@@ -553,6 +553,34 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
                 box_shape=UNIT_CUBE,
             )
 
+            water = OFFMolecule.from_smiles("O")
+            na = OFFMolecule.from_smiles("[Na+]")
+            cl = OFFMolecule.from_smiles("[Cl-]")
+
+            for molecule_index, molecule in enumerate(topology.molecules):
+                for atom in molecule.atoms:
+                    atom.metadata['residue_number'] = molecule_index
+
+                if molecule.n_atoms == [*smc_components.values()][0].n_atoms:
+                    # this is probably UNK, but just leave it be I guess
+                    continue
+                # molecules don't know their residue metadata, so need to set on each atom
+                # https://github.com/openforcefield/openff-toolkit/issues/1554
+                elif molecule.is_isomorphic_with(water):
+                    for atom in molecule.atoms:
+                        atom.metadata['residue_name'] = "WAT"
+                elif molecule.is_isomorphic_with(na):
+                    for atom in molecule.atoms:
+                        atom.metadata['residue_name'] = "Na"
+                elif molecule.is_isomorphic_with(cl):
+                    for atom in molecule.atoms:
+                        atom.metadata['residue_name'] = "Cl"
+                else:
+                    raise Exception("Found unexpected molecule in solvated topology")
+
+            component_resids[solvent_component] = np.arange(1, topology.n_molecules)
+
+
         with without_oechem_backend():
             interchange = force_field.create_interchange(
                 topology=topology,
