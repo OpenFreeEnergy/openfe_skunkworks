@@ -1,0 +1,19 @@
+Originally generated from [1], accessed 02/28/2024.
+Order copied from the same page, names inferred from GitHub profiles.
+* [1] https://github.com/OpenFreeEnergy/openfe/graphs/contributors
+
+Richard Gowers
+Irfan Alibay
+David W.H. Swenson
+Benjamin Ries
+Mike Henry
+Hannah Baumann
+Josh A. Mitchell
+Jenke Scheen
+David L. Dotson
+Matt Thompson
+David Slochower
+
+Includes code vendored from openfe.
+
+OpenMM protocols derive from work in Perses and Yank.
