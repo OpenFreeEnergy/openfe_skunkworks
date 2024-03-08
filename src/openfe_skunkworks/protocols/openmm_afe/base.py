@@ -589,7 +589,8 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
 
         return (
             interchange.to_openmm_topology(),
-            interchange.to_openmm_system(), interchange.positions.to_openmm(),
+            interchange.to_openmm_system(),
+            interchange.positions.to_openmm(),
             component_resids,
         )
 
