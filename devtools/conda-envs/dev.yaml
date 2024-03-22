@@ -1,0 +1,19 @@
+name: skunkworks-dev
+channels:
+  - conda-forge
+dependencies:
+  - conda-forge/label/gufe_rc::gufe ==1.0.0rc0
+  - conda-forge/label/openfe_rc::openfe ==1.0.0rc0
+  - mdtraj
+  - numpy
+  - openmm
+  - openmmtools
+  - openmmforcefields
+  - openff-models
+  - openff-units
+  - openff-toolkit
+  - pytest
+  - pytest-randomly
+  - pytest-xdist
+  - pydantic =2
+  - ipdb

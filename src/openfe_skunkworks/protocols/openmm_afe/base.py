@@ -25,9 +25,10 @@ from gufe.components import Component
 import numpy as np
 import numpy.typing as npt
 import openmm
+from openff.models.types import ArrayQuantity
 from openff.units import unit
-from openff.units.openmm import from_openmm, to_openmm, ensure_quantity
-from openff.toolkit.topology import Molecule as OFFMolecule
+from openff.units.openmm import ensure_quantity, to_openmm
+from openff.toolkit import Molecule as OFFMolecule, ForceField, Topology
 from openmmtools import multistate
 from openmmtools.states import (SamplerState,
                                 ThermodynamicState,
@@ -42,7 +43,6 @@ import pathlib
 from typing import Any
 import openmmtools
 import mdtraj as mdt
-
 from gufe import (
     settings, ChemicalSystem, SmallMoleculeComponent,
     ProteinComponent, SolventComponent
@@ -54,10 +54,13 @@ from openfe.protocols.openmm_utils.omm_settings import (
     BasePartialChargeSettings,
 )
 from openfe.protocols.openmm_afe.equil_afe_settings import (
-    BaseSolvationSettings,
     MultiStateSimulationSettings, OpenMMEngineSettings,
     IntegratorSettings, LambdaSettings, MultiStateOutputSettings,
     ThermoSettings, OpenFFPartialChargeSettings,
+)
+from openfe_skunkworks.protocols.openmm_utils.omm_settings import (
+    OpenMMSolvationSettings,
+    BaseSolvationSettings,
 )
 from openfe.protocols.openmm_rfe._rfe_utils import compute
 from openfe.protocols.openmm_md.plain_md_methods import PlainMDProtocolUnit
@@ -401,7 +404,7 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
         smc_components: dict[SmallMoleculeComponent, OFFMolecule],
         system_generator: SystemGenerator,
         partial_charge_settings: BasePartialChargeSettings,
-        solvation_settings: BaseSolvationSettings
+        solvation_settings: BaseSolvationSettings,
     ) -> tuple[app.Modeller, dict[Component, npt.NDArray]]:
         """
         Get an OpenMM Modeller object and a list of residue indices
@@ -461,25 +464,161 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
 
         return system_modeller, comp_resids
 
-    def _get_omm_objects(
+    def _get_omm_objects_via_openmmforcefields(
         self,
-        system_modeller: app.Modeller,
+        modeller: app.Modeller,
         system_generator: SystemGenerator,
         smc_components: list[OFFMolecule],
-    ) -> tuple[app.Topology, openmm.unit.Quantity, openmm.System]:
+    ) -> tuple[
+        app.Topology,
+        openmm.System,
+        openmm.unit.Quantity,
+    ]:
+
+        topology = modeller.getTopology()
+
+        positions = ArrayQuantity.validate_type(modeller.getPositions())
+
+        system =system_generator.create_system(
+            topology = topology,
+            molecules=smc_components,
+        )
+
+        return topology, system, positions.to_openmm()
+
+    def _get_omm_objects_via_interchange(
+        self,
+        protein_component: Optional[ProteinComponent],
+        solvent_component: Optional[SolventComponent],
+        smc_components: dict[SmallMoleculeComponent, OFFMolecule],
+        settings: dict[str, SettingsBaseModel],
+    ) -> tuple[
+        app.Topology,
+        openmm.System,
+        openmm.unit.Quanity,
+        dict[Component, npt.NDArray],
+      ]:
+        if self.verbose:
+            self.logger.info("Parameterizing molecules")
+
+        if (protein_component is not None) or (
+            len(smc_components) > 1
+        ):
+            raise NotImplementedError("just doing (one) small molecule, no protein, at first")
+
+        # Assign partial charges to smcs, doing the same thing as in _get_modeller
+        self._assign_partial_charges(
+            partial_charge_settings=settings['charge_settings'],
+            smc_components=smc_components,
+        )
+
+        component_resids = {component: np.array([0]) for component in smc_components}
+
+        use_constrained = settings['forcefield_settings'].constraints == "hbonds"
+
+        if use_constrained:
+            self.logger.info(f"Using constrained forcefield since {settings['forcefield_settings'].constraints=}")
+            force_field = ForceField(f"{settings['forcefield_settings'].small_molecule_forcefield}.offxml")
+        else:
+            self.logger.info(f"Using unconstrained forcefield since {settings['forcefield_settings'].constraints=}")
+            force_field = ForceField(
+                '_unconstrained-'.join([val for val in settings['forcefield_settings'].small_molecule_forcefield.split("-")]) + ".offxml"
+            )
+
+        force_field['vdW'].cutoff = settings['forcefield_settings'].nonbonded_cutoff
+        force_field['Electrostatics'].cutoff = settings['forcefield_settings'].nonbonded_cutoff
+
+        if solvent_component is None:
+            topology = Topology.from_molecules(*smc_components.values())
+        else:
+            from openff.interchange.components._packmol import solvate_topology, UNIT_CUBE
+            
+            # might want to split out depending on if pack_box or solvate_topology is used
+            # TODO: Actually use the right settings here
+            # TODO: Either update solvation_topology to actually use non-water solvent
+            #       or use pack_box to add the solvent or make a new function altogether
+
+            # lost solvent settings include
+            #  * positive_ion
+            #  * negative_ion
+            #  * neutralize
+            # lost solvation settings include
+            #  * solvent_model
+            assert solvent_component.positive_ion == "Na+"
+            assert solvent_component.negative_ion == "Cl-"
+
+            assert len(smc_components) == 1
+
+            topology = solvate_topology(
+                topology=[*smc_components.values()][0].to_topology(),
+                nacl_conc = solvent_component.ion_concentration,
+                padding = settings['solvation_settings'].solvent_padding,
+                box_shape=UNIT_CUBE,
+            )
+
+            water = OFFMolecule.from_smiles("O")
+            na = OFFMolecule.from_smiles("[Na+]")
+            cl = OFFMolecule.from_smiles("[Cl-]")
+
+            for molecule_index, molecule in enumerate(topology.molecules):
+                for atom in molecule.atoms:
+                    atom.metadata['residue_number'] = molecule_index
+
+                if molecule.n_atoms == [*smc_components.values()][0].n_atoms:
+                    # this is probably UNK, but just leave it be I guess
+                    continue
+                # molecules don't know their residue metadata, so need to set on each atom
+                # https://github.com/openforcefield/openff-toolkit/issues/1554
+                elif molecule.is_isomorphic_with(water):
+                    for atom in molecule.atoms:
+                        atom.metadata['residue_name'] = "WAT"
+                elif molecule.is_isomorphic_with(na):
+                    for atom in molecule.atoms:
+                        atom.metadata['residue_name'] = "Na"
+                elif molecule.is_isomorphic_with(cl):
+                    for atom in molecule.atoms:
+                        atom.metadata['residue_name'] = "Cl"
+                else:
+                    raise Exception("Found unexpected molecule in solvated topology")
+
+            component_resids[solvent_component] = np.arange(1, topology.n_molecules)
+
+
+        with without_oechem_backend():
+            interchange = force_field.create_interchange(
+                topology=topology,
+                charge_from_molecules=[*smc_components.values()],
+            )
+
+        return (
+            interchange.to_openmm_topology(),
+            interchange.to_openmm_system(),
+            interchange.positions.to_openmm(),
+            component_resids,
+        )
+
+    def _get_omm_objects(
+        self,
+        settings: dict[str, SettingsBaseModel],
+        protein_component: Optional[ProteinComponent],
+        solvent_component: Optional[SolventComponent],
+        smc_components: dict[SmallMoleculeComponent, OFFMolecule],
+    ) -> tuple[
+        app.Topology,
+        openmm.System,
+        openmm.unit.Quantity,
+        dict[str, npt.NDArray],
+    ]:
         """
         Get the OpenMM Topology, Positions and System of the
         parameterised system.
 
         Parameters
         ----------
-        system_modeller : app.Modeller
-          OpenMM Modeller object representing the system to be
-          parametrized.
-        system_generator : SystemGenerator
-          SystemGenerator object to create a System with.
-        smc_components : list[openff.toolkit.Molecule]
-          A list of openff Molecules to add to the system.
+        settings
+        protiein_component : Optional[ProteinComponent]
+        solvent_component : Optional[SolventComponent]
+        smc_components : dict[str, OFFMolecule]
 
         Returns
         -------
@@ -489,19 +628,42 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
           An OpenMM System of the alchemical system.
         positionns : openmm.unit.Quantity
           Positions of the system.
+        comp_resids : dict[str, npt.NDArray]
+          A dictionary of residues for each component in the System.
         """
-        topology = system_modeller.getTopology()
-        # roundtrip positions to remove vec3 issues
-        positions = to_openmm(from_openmm(system_modeller.getPositions()))
+        use_interchange = (
+            (protein_component is None) and 
+            (len(smc_components) == 1)
+        )
 
-        # Block out oechem backend to avoid any issues with
-        # smiles roundtripping between rdkit and oechem
-        with without_oechem_backend():
-            system = system_generator.create_system(
-                system_modeller.topology,
-                molecules=smc_components,
+        if use_interchange:
+            # TODO: See if the base class can really support both cases
+            return self._get_omm_objects_via_interchange(
+                protein_component=protein_component,
+                solvent_component=solvent_component,
+                smc_components=smc_components,
+                settings=settings,
             )
-        return topology, system, positions
+        else:
+          system_generator = self._get_system_generator(
+              settings=settings, solvent_comp=solvent_component,
+          )
+
+          system_modeller, comp_resids = self._get_modeller(
+              protein_component=protein_component,
+              solvent_component=solvent_component,
+              smc_components=smc_components,
+              system_generator=system_generator,
+              partial_charge_settings=settings['charge_settings'],
+              solvation_settings=settings['solvation_settings'],
+          )
+
+          return *self._get_omm_objects_via_openmmforcefields(
+              modeller=system_modeller,
+              system_generator=system_generator,
+              smc_components=list(smc_components.values()),
+          ), comp_resids
+
 
     def _get_lambda_schedule(
         self, settings: dict[str, SettingsBaseModel]
@@ -978,19 +1140,17 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
         # 2. Get settings
         settings = self._handle_settings()
 
-        # 3. Get system generator
-        system_generator = self._get_system_generator(settings, solv_comp)
-
-        # 4. Get modeller
-        system_modeller, comp_resids = self._get_modeller(
-            prot_comp, solv_comp, smc_comps, system_generator,
-            settings['charge_settings'],
-            settings['solvation_settings'],
-        )
-
-        # 5. Get OpenMM topology, positions and system
-        omm_topology, omm_system, positions = self._get_omm_objects(
-            system_modeller, system_generator, list(smc_comps.values())
+        # 3-5. Get OpenMM objects and resids in one go
+        (
+            omm_topology,
+            omm_system,
+            positions,
+            comp_resids,
+        ) = self._get_omm_objects(
+            settings=settings,
+            protein_component=prot_comp,
+            solvent_component=solv_comp,
+            smc_components=smc_comps,
         )
 
         # 6. Pre-equilbrate System (Test + Avoid NaNs + get stable system)

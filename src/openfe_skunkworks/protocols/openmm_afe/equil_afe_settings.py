@@ -141,7 +141,7 @@ class AbsoluteSolvationSettings(SettingsBaseModel):
     thermo_settings: ThermoSettings
     """Settings for thermodynamic parameters"""
 
-    solvation_settings: OpenMMSolvationSettings
+    solvation_settings: BaseSolvationSettings
     """Settings for solvating the system."""
 
     # Alchemical settings
