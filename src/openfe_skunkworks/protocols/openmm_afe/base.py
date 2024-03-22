@@ -514,13 +514,16 @@ class BaseAbsoluteUnit(gufe.ProtocolUnit):
 
         component_resids = {component: np.array([0]) for component in smc_components}
 
-        force_field = ForceField(
-            '_unconstrained-'.join([val for val in settings['forcefield_settings'].small_molecule_forcefield.split("-")]) + ".offxml"
-        )
+        use_constrained = settings['forcefield_settings'].constraints == "hbonds"
 
-        # not sure how much we want to muck with these settings?
-        # settings['forcefield_settings'].hydrogen_mass == 0.0
-        assert settings['forcefield_settings'].constraints in ("hbonds", None)
+        if use_constrained:
+            self.logger.info(f"Using constrained forcefield since {settings['forcefield_settings'].constraints=}")
+            force_field = ForceField(f"{settings['forcefield_settings'].small_molecule_forcefield}.offxml")
+        else:
+            self.logger.info(f"Using unconstrained forcefield since {settings['forcefield_settings'].constraints=}")
+            force_field = ForceField(
+                '_unconstrained-'.join([val for val in settings['forcefield_settings'].small_molecule_forcefield.split("-")]) + ".offxml"
+            )
 
         force_field['vdW'].cutoff = settings['forcefield_settings'].nonbonded_cutoff
         force_field['Electrostatics'].cutoff = settings['forcefield_settings'].nonbonded_cutoff

@@ -16,3 +16,4 @@ dependencies:
   - pytest-randomly
   - pytest-xdist
   - pydantic =2
+  - ipdb
